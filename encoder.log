@@ -1,0 +1,8 @@
+2025-11-26 07:16:40 [INFO] encoder: start input_file=input.txt
+2025-11-26 07:16:40 [INFO] encoder: count_symbols done total_symbols=823 unique_symbols=44
+2025-11-26 07:16:40 [INFO] encoder: build_huffman_tree done
+2025-11-26 07:16:40 [INFO] encoder: assign_codewords done
+2025-11-26 07:16:40 [INFO] encoder: generate_codebook output_codebook=codebook.csv
+2025-11-26 07:16:40 [INFO] encoder: encode_to_bitstream output_encoded=encoded.bin
+2025-11-26 07:16:40 [INFO] metrics: summary input_file=input.txt output_codebook=codebook.csv output_encoded=encoded.bin num_symbols=823 unique_symbols=44
+2025-11-26 07:16:40 [INFO] encoder: finish status=ok
