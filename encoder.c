@@ -28,6 +28,7 @@ HuffmanNode* build_huffman_tree(SymbolEntry *symbols, int num_symbols);
 void generate_code(HuffmanNode *node, char *code, int depth, SymbolEntry *symbols, int num_symbols);
 void write_codebook(SymbolEntry *symbols, int num_symbols, const char *filename);
 void encode_file(const char *input_file, const char *output_file, SymbolEntry *symbols, int num_symbols);
+void free_huffman_tree(HuffmanNode *node);
 
 // ----------------- Main -----------------
 int main(int argc, char *argv[]) {
@@ -36,25 +37,96 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    const char *input_file = argv[1];
+    const char *input_file    = argv[1];
     const char *codebook_file = argv[2];
-    const char *encoded_file = argv[3];
+    const char *encoded_file  = argv[3];
+
+    /* 初始化 logger，輸出到 encoder.log */
+    log_init(NULL, NULL);
+    FILE *logf = fopen("encoder.log", "w");
+    if (logf) {
+        log_set_info_fp(logf);
+        log_set_error_fp(logf);
+    } else {
+        /* 開 log 檔失敗就退回 stdout/stderr */
+        log_error("encoder", "cannot_open_log_file encoder.log, fallback to stdout/stderr");
+    }
+
+    log_info("encoder",
+             "start input_file=%s codebook_file=%s encoded_file=%s",
+             input_file, codebook_file, encoded_file);
 
     SymbolEntry symbols[MAX_SYMBOLS];
     int num_symbols = 0;
     unsigned long total_symbols = 0;
 
     count_symbols(input_file, symbols, &num_symbols, &total_symbols);
+    if (num_symbols == 0) {
+        log_error("encoder", "no_symbols_found input_file=%s", input_file);
+        log_error("encoder", "finish status=error");
+        if (logf) fclose(logf);
+        return 1;
+    }
+
+    log_info("encoder",
+             "histogram_built num_symbols=%d total_symbols=%lu",
+             num_symbols, total_symbols);
 
     HuffmanNode *root = build_huffman_tree(symbols, num_symbols);
+    if (!root) {
+        log_error("encoder", "build_huffman_tree_failed");
+        log_error("encoder", "finish status=error");
+        if (logf) fclose(logf);
+        return 1;
+    }
 
     char code[MAX_CODE_LEN];
     generate_code(root, code, 0, symbols, num_symbols);
+    log_info("encoder",
+             "codebook_generated num_symbols=%d",
+             num_symbols);
 
     write_codebook(symbols, num_symbols, codebook_file);
+    log_info("encoder",
+             "write_codebook done file=%s",
+             codebook_file);
 
     encode_file(input_file, encoded_file, symbols, num_symbols);
+    log_info("encoder",
+             "encode_file done encoded_file=%s",
+             encoded_file);
 
+    /* ---- metrics summary ---- */
+    double entropy = 0.0;
+    double avg_code_len = 0.0;
+    unsigned long encoded_bits = 0;
+
+    for (int i = 0; i < num_symbols; i++) {
+        int L = (int)strlen(symbols[i].code);
+        entropy       += symbols[i].prob * symbols[i].self_info;      // bits
+        avg_code_len  += symbols[i].prob * L;                         // bits/symbol
+        encoded_bits  += symbols[i].count * (unsigned long)L;         // total bits
+    }
+    unsigned long original_bits = total_symbols * 8UL;
+    double compression_ratio = (original_bits > 0)
+                               ? (double)encoded_bits / (double)original_bits
+                               : 0.0;
+
+    log_info("metrics",
+             "summary input_file=%s codebook_file=%s encoded_file=%s "
+             "total_symbols=%lu num_unique_symbols=%d entropy=%.6f "
+             "avg_code_length=%.6f original_bits=%lu encoded_bits=%lu "
+             "compression_ratio=%.6f status=ok",
+             input_file, codebook_file, encoded_file,
+             total_symbols, num_symbols,
+             entropy, avg_code_len,
+             original_bits, encoded_bits,
+             compression_ratio);
+
+    log_info("encoder", "finish status=ok");
+
+    free_huffman_tree(root);
+    if (logf) fclose(logf);
     return 0;
 }
 
@@ -63,14 +135,19 @@ int main(int argc, char *argv[]) {
 void count_symbols(const char *filename, SymbolEntry *symbols, int *num_symbols, unsigned long *total_symbols) {
     unsigned long hist[MAX_SYMBOLS] = {0};
     FILE *f = fopen(filename, "rb");
-    if (!f) { perror("fopen"); exit(1); }
+    if (!f) {
+        perror("fopen");
+        exit(1);
+    }
 
     int c;
-    while ((c = fgetc(f)) != EOF) hist[c]++;
+    while ((c = fgetc(f)) != EOF) {
+        hist[(unsigned char)c]++;
+    }
     fclose(f);
 
-    // 添加 EOF symbol，使用 255 表示
-    hist[255] = 1;
+    // 加入 EOF symbol (使用 255)
+    hist[255] += 1;
 
     int n = 0;
     unsigned long total = 0;
@@ -87,13 +164,13 @@ void count_symbols(const char *filename, SymbolEntry *symbols, int *num_symbols,
     }
 
     for (int i = 0; i < n; i++) {
-        symbols[i].prob = (double)symbols[i].count / total;
+        symbols[i].prob = (double)symbols[i].count / (double)total;
         symbols[i].self_info = -log2(symbols[i].prob);
     }
 
-    // 遞增排序: primary count, secondary symbol
-    for (int i = 0; i < n-1; i++) {
-        for (int j = i+1; j < n; j++) {
+    // 依 count 遞增排序，count 一樣時看 sym
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
             if (symbols[i].count > symbols[j].count ||
                (symbols[i].count == symbols[j].count && symbols[i].sym > symbols[j].sym)) {
                 SymbolEntry tmp = symbols[i];
@@ -108,10 +185,21 @@ void count_symbols(const char *filename, SymbolEntry *symbols, int *num_symbols,
 }
 
 HuffmanNode* build_huffman_tree(SymbolEntry *symbols, int num_symbols) {
+    if (num_symbols <= 0) return NULL;
+
     int n = num_symbols;
-    HuffmanNode **nodes = malloc(sizeof(HuffmanNode*) * n);
+    HuffmanNode **nodes = (HuffmanNode **)malloc(sizeof(HuffmanNode*) * n);
+    if (!nodes) {
+        fprintf(stderr, "malloc failed\n");
+        exit(1);
+    }
+
     for (int i = 0; i < n; i++) {
-        nodes[i] = malloc(sizeof(HuffmanNode));
+        nodes[i] = (HuffmanNode *)malloc(sizeof(HuffmanNode));
+        if (!nodes[i]) {
+            fprintf(stderr, "malloc failed\n");
+            exit(1);
+        }
         nodes[i]->sym = symbols[i].sym;
         nodes[i]->count = symbols[i].count;
         nodes[i]->left = NULL;
@@ -120,21 +208,33 @@ HuffmanNode* build_huffman_tree(SymbolEntry *symbols, int num_symbols) {
 
     while (n > 1) {
         int min1 = 0, min2 = 1;
-        if (nodes[min1]->count > nodes[min2]->count) { int t = min1; min1 = min2; min2 = t; }
+        if (nodes[min1]->count > nodes[min2]->count) {
+            int t = min1; min1 = min2; min2 = t;
+        }
         for (int i = 2; i < n; i++) {
-            if (nodes[i]->count < nodes[min1]->count) { min2 = min1; min1 = i; }
-            else if (nodes[i]->count < nodes[min2]->count) { min2 = i; }
+            if (nodes[i]->count < nodes[min1]->count) {
+                min2 = min1;
+                min1 = i;
+            } else if (nodes[i]->count < nodes[min2]->count) {
+                min2 = i;
+            }
         }
 
-        HuffmanNode *parent = malloc(sizeof(HuffmanNode));
+        HuffmanNode *parent = (HuffmanNode *)malloc(sizeof(HuffmanNode));
+        if (!parent) {
+            fprintf(stderr, "malloc failed\n");
+            exit(1);
+        }
+        parent->sym = 0; // internal node
         parent->count = nodes[min1]->count + nodes[min2]->count;
         parent->left = nodes[min1];
         parent->right = nodes[min2];
-        parent->sym = 0;
 
-        if (min1 > min2) { int t = min1; min1 = min2; min2 = t; }
+        if (min1 > min2) {
+            int t = min1; min1 = min2; min2 = t;
+        }
         nodes[min1] = parent;
-        nodes[min2] = nodes[n-1];
+        nodes[min2] = nodes[n - 1];
         n--;
     }
 
@@ -145,41 +245,57 @@ HuffmanNode* build_huffman_tree(SymbolEntry *symbols, int num_symbols) {
 
 void generate_code(HuffmanNode *node, char *code, int depth, SymbolEntry *symbols, int num_symbols) {
     if (!node) return;
+
+    // 葉節點
     if (!node->left && !node->right) {
+        // 若整棵樹只有一個符號，depth 會是 0，給它 code "0"
+        if (depth == 0) {
+            code[0] = '0';
+            depth = 1;
+        }
         code[depth] = '\0';
+
         for (int i = 0; i < num_symbols; i++) {
             if (symbols[i].sym == node->sym) {
                 strcpy(symbols[i].code, code);
-                return;
+                break;
             }
         }
+        return;
     }
+
     if (node->left) {
         code[depth] = '0';
-        generate_code(node->left, code, depth+1, symbols, num_symbols);
+        generate_code(node->left, code, depth + 1, symbols, num_symbols);
     }
     if (node->right) {
         code[depth] = '1';
-        generate_code(node->right, code, depth+1, symbols, num_symbols);
+        generate_code(node->right, code, depth + 1, symbols, num_symbols);
     }
 }
 
 void write_codebook(SymbolEntry *symbols, int num_symbols, const char *filename) {
     FILE *f = fopen(filename, "w");
-    if (!f) { perror("fopen codebook"); exit(1); }
+    if (!f) {
+        perror("fopen codebook");
+        exit(1);
+    }
 
     for (int i = 0; i < num_symbols; i++) {
         const char *sym_str;
         static char tmp[8];
 
-        if (symbols[i].sym == '\n') sym_str = "\\n";
-        else if (symbols[i].sym == '\r') sym_str = "\\r";
-        else if (symbols[i].sym == 255) sym_str = "EOF";
-        else if (symbols[i].sym < 32 || symbols[i].sym > 126) {
+        if (symbols[i].sym == '\n') {
+            sym_str = "\\n";
+        } else if (symbols[i].sym == '\r') {
+            sym_str = "\\r";
+        } else if (symbols[i].sym == 255) {
+            sym_str = "EOF";
+        } else if (symbols[i].sym < 32 || symbols[i].sym > 126) {
             sprintf(tmp, "0x%02X", symbols[i].sym);
             sym_str = tmp;
         } else {
-            tmp[0] = symbols[i].sym;
+            tmp[0] = (char)symbols[i].sym;
             tmp[1] = '\0';
             sym_str = tmp;
         }
@@ -198,50 +314,83 @@ void write_codebook(SymbolEntry *symbols, int num_symbols, const char *filename)
 void encode_file(const char *input_file, const char *output_file, SymbolEntry *symbols, int num_symbols) {
     FILE *fin = fopen(input_file, "rb");
     FILE *fout = fopen(output_file, "wb");
-    if (!fin || !fout) { perror("fopen"); exit(1); }
+    if (!fin || !fout) {
+        perror("fopen");
+        if (fin)  fclose(fin);
+        if (fout) fclose(fout);
+        exit(1);
+    }
 
     int c;
     unsigned char buffer = 0;
     int bits_filled = 0;
 
     while ((c = fgetc(fin)) != EOF) {
+        unsigned char uc = (unsigned char)c;
+        const char *code = NULL;
+
         for (int i = 0; i < num_symbols; i++) {
-            if (symbols[i].sym == (unsigned char)c) {
-                for (int j = 0; symbols[i].code[j]; j++) {
-                    buffer = (buffer << 1) | (symbols[i].code[j]=='1'?1:0);
-                    bits_filled++;
-                    if (bits_filled == 8) {
-                        fputc(buffer, fout);
-                        buffer = 0;
-                        bits_filled = 0;
-                    }
-                }
+            if (symbols[i].sym == uc) {
+                code = symbols[i].code;
                 break;
+            }
+        }
+
+        if (!code) {
+            fprintf(stderr, "No code found for symbol 0x%02X\n", uc);
+            fclose(fin);
+            fclose(fout);
+            exit(1);
+        }
+
+        for (int j = 0; code[j]; j++) {
+            buffer = (unsigned char)((buffer << 1) | (code[j] == '1' ? 1 : 0));
+            bits_filled++;
+            if (bits_filled == 8) {
+                fputc(buffer, fout);
+                buffer = 0;
+                bits_filled = 0;
             }
         }
     }
 
     // encode EOF
+    const char *eof_code = NULL;
     for (int i = 0; i < num_symbols; i++) {
         if (symbols[i].sym == 255) {
-            for (int j = 0; symbols[i].code[j]; j++) {
-                buffer = (buffer << 1) | (symbols[i].code[j]=='1'?1:0);
-                bits_filled++;
-                if (bits_filled == 8) {
-                    fputc(buffer, fout);
-                    buffer = 0;
-                    bits_filled = 0;
-                }
-            }
+            eof_code = symbols[i].code;
             break;
+        }
+    }
+    if (!eof_code) {
+        fprintf(stderr, "EOF symbol code not found.\n");
+        fclose(fin);
+        fclose(fout);
+        exit(1);
+    }
+
+    for (int j = 0; eof_code[j]; j++) {
+        buffer = (unsigned char)((buffer << 1) | (eof_code[j] == '1' ? 1 : 0));
+        bits_filled++;
+        if (bits_filled == 8) {
+            fputc(buffer, fout);
+            buffer = 0;
+            bits_filled = 0;
         }
     }
 
     if (bits_filled > 0) {
-        buffer <<= (8 - bits_filled); // 補滿最後一個 byte
+        buffer <<= (8 - bits_filled);
         fputc(buffer, fout);
     }
 
     fclose(fin);
     fclose(fout);
+}
+
+void free_huffman_tree(HuffmanNode *node) {
+    if (!node) return;
+    free_huffman_tree(node->left);
+    free_huffman_tree(node->right);
+    free(node);
 }
