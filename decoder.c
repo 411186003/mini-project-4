@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include "logger.h"
 
 #define MAX_SYMBOLS 256
 #define EOF_SYMBOL 255
@@ -17,20 +17,32 @@ typedef struct {
     char code[128];
 } Entry;
 
+/* ----------------- 解析 symbol 字串 ----------------- */
+
 int parse_symbol(const char *s) {
     if (strcmp(s, "\\n") == 0) return '\n';
     if (strcmp(s, "\\r") == 0) return '\r';
-    if (strcmp(s, "EOF") == 0) return EOF_SYMBOL;
+    if (strcmp(s, "EOF") == 0)  return EOF_SYMBOL;
+
     if (strncmp(s, "0x", 2) == 0) {
         unsigned int val;
-        if (sscanf(s, "0x%X", &val) == 1) return val;
+        if (sscanf(s, "0x%X", &val) == 1) return (int)val;
     }
-    if (strlen(s) == 1) return s[0];
+
+    if (strlen(s) == 1) return (unsigned char)s[0];
+
+    // 無法解析的就略過
     return -1;
 }
 
+/* ----------------- Huffman tree 操作 ----------------- */
+
 Node *new_node(int sym) {
-    Node *n = malloc(sizeof(Node));
+    Node *n = (Node *)malloc(sizeof(Node));
+    if (!n) {
+        fprintf(stderr, "malloc failed\n");
+        exit(1);
+    }
     n->sym = sym;
     n->left = n->right = NULL;
     return n;
@@ -53,27 +65,33 @@ void insert_code(Node *root, const char *code, int sym) {
     curr->sym = sym;
 }
 
+void free_tree(Node *root) {
+    if (!root) return;
+    free_tree(root->left);
+    free_tree(root->right);
+    free(root);
+}
+
+/* ----------------- bit 讀取 ----------------- */
+
 int read_bit(FILE *f) {
     static int bits_left = 0;
     static unsigned char byte = 0;
+
     if (bits_left == 0) {
         int c = fgetc(f);
         if (c == EOF) return -1;
         byte = (unsigned char)c;
         bits_left = 8;
     }
+
     int bit = (byte >> 7) & 1;
     byte <<= 1;
     bits_left--;
     return bit;
 }
 
-// 取得時間字串
-void timestamp(char *buf, size_t sz) {
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    strftime(buf, sz, "%Y-%m-%d %H:%M:%S", tm);
-}
+/* ----------------- main ----------------- */
 
 int main(int argc, char **argv) {
     if (argc != 4) {
@@ -85,29 +103,38 @@ int main(int argc, char **argv) {
     const char *cb_fn  = argv[2];
     const char *enc_fn = argv[3];
 
-    char timebuf[32];
-    timestamp(timebuf, sizeof(timebuf));
-    FILE *flog = fopen("decoder.log", "w");
-    if (!flog) { perror("fopen decoder.log"); return 1; }
-    fprintf(flog, "%s [INFO] decoder: start \\\n    input_encoded=%s \\\n    input_codebook=%s \\\n    output_file=%s\n",
-            timebuf, enc_fn, cb_fn, out_fn);
+    /* 初始化 logger，輸出到 decoder.log */
+    log_init(NULL, NULL);
+    FILE *logf = fopen("decoder.log", "w");
+    if (logf) {
+        log_set_info_fp(logf);
+        log_set_error_fp(logf);
+    } else {
+        log_error("decoder", "cannot_open_log_file decoder.log, fallback to stdout/stderr");
+    }
 
-    // 讀 codebook
+    log_info("decoder",
+             "start input_encoded=%s input_codebook=%s output_file=%s",
+             enc_fn, cb_fn, out_fn);
+
+    /* 讀 codebook.csv */
     FILE *fcb = fopen(cb_fn, "r");
-    if (!fcb) { 
-        timestamp(timebuf, sizeof(timebuf));
-        fprintf(flog, "%s [ERROR] decoder: cannot_open_codebook\n", timebuf);
-        fclose(flog);
+    if (!fcb) {
+        log_error("decoder", "cannot_open_codebook codebook=%s", cb_fn);
+        log_error("decoder", "finish status=error");
+        if (logf) fclose(logf);
         return 1;
     }
 
     Entry table[MAX_SYMBOLS];
     int entry_count = 0;
     char line[256];
+
     while (fgets(line, sizeof(line), fcb)) {
         char symbol_str[32], code[128];
         unsigned long count;
         double prob, self_info;
+
         if (sscanf(line, "\"%[^\"]\",%lu,%lf,\"%[^\"]\",%lf",
                    symbol_str, &count, &prob, code, &self_info) == 5) {
             int s = parse_symbol(symbol_str);
@@ -118,67 +145,84 @@ int main(int argc, char **argv) {
         }
     }
     fclose(fcb);
-    timestamp(timebuf, sizeof(timebuf));
-    fprintf(flog, "%s [INFO] decoder: load_codebook entries=%d\n", timebuf, entry_count);
 
+    log_info("decoder",
+             "load_codebook entries=%d",
+             entry_count);
+
+    /* 建 Huffman tree */
     Node *root = new_node(-1);
     for (int i = 0; i < entry_count; i++) {
         insert_code(root, table[i].code, table[i].sym);
     }
+    log_info("decoder", "build_tree done");
 
+    /* 開啟 encoded.bin + output.txt */
     FILE *fenc = fopen(enc_fn, "rb");
-    if (!fenc) { 
-        timestamp(timebuf, sizeof(timebuf));
-        fprintf(flog, "%s [ERROR] decoder: cannot_open_encoded_file\n", timebuf);
-        fclose(flog);
-        return 1;
-    }
-    FILE *fout = fopen(out_fn, "wb");
-    if (!fout) { 
-        timestamp(timebuf, sizeof(timebuf));
-        fprintf(flog, "%s [ERROR] decoder: cannot_open_output_file\n", timebuf);
-        fclose(fenc);
-        fclose(flog);
+    if (!fenc) {
+        log_error("decoder", "cannot_open_encoded_file encoded=%s", enc_fn);
+        free_tree(root);
+        log_error("decoder", "finish status=error");
+        if (logf) fclose(logf);
         return 1;
     }
 
+    FILE *fout = fopen(out_fn, "wb");
+    if (!fout) {
+        log_error("decoder", "cannot_open_output_file output=%s", out_fn);
+        fclose(fenc);
+        free_tree(root);
+        log_error("decoder", "finish status=error");
+        if (logf) fclose(logf);
+        return 1;
+    }
+
+    /* 解碼 bitstream */
     Node *curr = root;
     int bit;
     unsigned long num_decoded = 0;
     unsigned long bit_pos = 0;
 
+    log_info("decoder", "decode_bitstream begin");
+
     while ((bit = read_bit(fenc)) != -1) {
         bit_pos++;
         curr = (bit == 0) ? curr->left : curr->right;
+
         if (!curr) {
-            timestamp(timebuf, sizeof(timebuf));
-            fprintf(flog, "%s [ERROR] decoder: invalid_codeword \\\n    bit_position=%lu \\\n    reason=unexpected_prefix\n",
-                    timebuf, bit_pos);
+            log_error("decoder",
+                      "invalid_codeword bit_position=%lu reason=unexpected_prefix",
+                      bit_pos);
             curr = root;
-            continue; // 忽略 padding，繼續
+            continue;
         }
-        if (curr->sym != -1) {
-            if (curr->sym == EOF_SYMBOL) break;
+
+        if (curr->sym != -1) {   // 走到葉節點
+            if (curr->sym == EOF_SYMBOL) {
+                // 碰到 EOF symbol，正常結束
+                break;
+            }
             fputc(curr->sym, fout);
             num_decoded++;
             curr = root;
         }
     }
 
-    timestamp(timebuf, sizeof(timebuf));
-    fprintf(flog, "%s [INFO] decoder: decode_bitstream \\\n    output_file=%s \\\n    num_decoded_symbols=%lu\n",
-            timebuf, out_fn, num_decoded);
-
-    timestamp(timebuf, sizeof(timebuf));
-    fprintf(flog, "%s [INFO] metrics: summary \\\n    input_encoded=%s \\\n    input_codebook=%s \\\n    output_file=%s \\\n    num_decoded_symbols=%lu \\\n    status=ok\n",
-            timebuf, enc_fn, cb_fn, out_fn, num_decoded);
-
-    timestamp(timebuf, sizeof(timebuf));
-    fprintf(flog, "%s [INFO] decoder: finish status=ok\n", timebuf);
-
     fclose(fenc);
     fclose(fout);
-    fclose(flog);
+    free_tree(root);
 
+    log_info("decoder",
+             "decode_bitstream done output_file=%s num_decoded_symbols=%lu",
+             out_fn, num_decoded);
+
+    log_info("metrics",
+             "summary input_encoded=%s input_codebook=%s output_file=%s "
+             "num_decoded_symbols=%lu status=ok",
+             enc_fn, cb_fn, out_fn, num_decoded);
+
+    log_info("decoder", "finish status=ok");
+
+    if (logf) fclose(logf);
     return 0;
 }
