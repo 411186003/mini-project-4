@@ -14,13 +14,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Compile encoder
-        run: gcc encoder.c logger.c -lm -o encoder.exe
+        run: gcc encoder.c logger.c -lm -o encoder
 
       - name: Compile decoder
-        run: gcc decoder.c logger.c -o decoder.exe
+        run: gcc decoder.c logger.c -o decoder
 
       - name: Run encoder
-        run: ./encoder.exe input.txt codebook.csv encoded.bin > encoder.log 2>&1
+        run: ./encoder input.txt codebook.csv encoded.bin > encoder.log 2>&1
 
       - name: Upload encoder artifacts
         uses: actions/upload-artifact@v4
@@ -32,7 +32,7 @@ jobs:
             encoder.log
 
       - name: Run decoder
-        run: ./decoder.exe output.txt codebook.csv encoded.bin > decoder.log 2>&1
+        run: ./decoder output.txt codebook.csv encoded.bin > decoder.log 2>&1
 
       - name: Upload decoder artifacts
         uses: actions/upload-artifact@v4
