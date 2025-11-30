@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Compile encoder
         run: gcc encoder.c logger.c -lm -o encoder
@@ -23,7 +23,7 @@ jobs:
         run: ./encoder input.txt codebook.csv encoded.bin > encoder.log 2>&1
 
       - name: Upload encoder artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: encoder-artifacts
           path: |
@@ -35,7 +35,7 @@ jobs:
         run: ./decoder output.txt codebook.csv encoded.bin > decoder.log 2>&1
 
       - name: Upload decoder artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: decoder-artifacts
           path: |
