@@ -19,6 +19,9 @@ jobs:
       - name: Compile decoder
         run: gcc decoder.c logger.c -o decoder.exe
 
+      - name: Download input.txt
+        run: curl -o input.txt https://sherlock-holm.es/stories/plain-text/cano.txt
+
       - name: Run encoder
         run: ./encoder.exe input.txt codebook.csv encoded.bin > encoder.log 2>&1
 
