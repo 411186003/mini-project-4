@@ -289,11 +289,12 @@ void write_codebook(SymbolEntry *symbols, int num_symbols, const char *filename)
             sym_str = "\\n";
         } else if (symbols[i].sym == '\r') {
             sym_str = "\\r";
-        } else if (symbols[i].sym == 255) {
+        }else if (symbols[i].sym == 255) {
             sym_str = "EOF";
-        } else if (symbols[i].sym < 32 || symbols[i].sym > 126) {
+        } else if (symbols[i].sym < 32 || symbols[i].sym > 126 || symbols[i].sym == '\"') {
+            // 把 " 也用 0xXX 形式寫，避免破壞 CSV
             sprintf(tmp, "0x%02X", symbols[i].sym);
-            sym_str = tmp;
+        sym_str = tmp;
         } else {
             tmp[0] = (char)symbols[i].sym;
             tmp[1] = '\0';
