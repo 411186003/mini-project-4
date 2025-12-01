@@ -395,5 +395,3 @@ void free_huffman_tree(HuffmanNode *node) {
     free_huffman_tree(node->right);
     free(node);
 }
-
-//trigger workflow
