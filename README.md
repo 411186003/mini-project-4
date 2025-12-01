@@ -28,6 +28,9 @@ Decoder: output.txt、decoder.log
 
 
 工作分配
-411186003 王麒禎
-411186008 林子陽
-411186016 葉哲旭
+411186003 王麒禎 完成encoder.c decoder.c
+
+411186008 林子陽 負責debug,解決"沒有成功編碼的原因
+
+411186016 葉哲旭 encoder.c decoder.c 的主架構,workflows製作
+
